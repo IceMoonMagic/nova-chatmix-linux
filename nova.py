@@ -10,19 +10,20 @@ from usb.core import find, USBTimeoutError, USBError
 class NovaProWireless:
     # USB IDs
     VID = 0x1038
-    PID = 0x12E0
+    # PID = 0x12E0
+    PID = 0x2253
 
     # bInterfaceNumber
-    INTERFACE = 0x4
+    INTERFACE = 0x5
 
     # bEndpointAddress
-    ENDPOINT_TX = 0x4  # EP 4 OUT
+    # ENDPOINT_TX = 0x4  # EP 4 OUT
     ENDPOINT_RX = 0x84  # EP 4 IN
 
     MSGLEN = 64  # Total USB packet is 128 bytes, data is last 64 bytes.
 
     # First byte controls data direction.
-    TX = 0x6  # To base station.
+    # TX = 0x6  # To base station.
     RX = 0x7  # From base station.
 
     # Second Byte
@@ -71,34 +72,34 @@ class NovaProWireless:
         return bytes(data).ljust(self.MSGLEN, b"0")
 
     # Enables/Disables chatmix controls
-    def set_chatmix_controls(self, state: bool):
-        self.dev.write(
-            self.ENDPOINT_TX,
-            self._create_msgdata((self.TX, self.OPT_CHATMIX_ENABLE, int(state))),
-        )
-        self.CHATMIX_CONTROLS_ENABLED = state
+    # def set_chatmix_controls(self, state: bool):
+    #     self.dev.write(
+    #         self.ENDPOINT_TX,
+    #         self._create_msgdata((self.TX, self.OPT_CHATMIX_ENABLE, int(state))),
+    #     )
+    #     self.CHATMIX_CONTROLS_ENABLED = state
 
     # Enables/Disables Sonar Icon
-    def set_sonar_icon(self, state: bool):
-        self.dev.write(
-            self.ENDPOINT_TX,
-            self._create_msgdata((self.TX, self.OPT_SONAR_ICON, int(state))),
-        )
-        self.SONAR_ICON_ENABLED = state
+    # def set_sonar_icon(self, state: bool):
+    #     self.dev.write(
+    #         self.ENDPOINT_TX,
+    #         self._create_msgdata((self.TX, self.OPT_SONAR_ICON, int(state))),
+    #     )
+    #     self.SONAR_ICON_ENABLED = state
 
     # Sets Volume
-    def set_volume(self, attenuation: int):
-        self.dev.write(
-            self.ENDPOINT_TX,
-            self._create_msgdata((self.TX, self.OPT_VOLUME, attenuation)),
-        )
+    # def set_volume(self, attenuation: int):
+    #     self.dev.write(
+    #         self.ENDPOINT_TX,
+    #         self._create_msgdata((self.TX, self.OPT_VOLUME, attenuation)),
+    #    )
 
     # Sets EQ preset
-    def set_eq_preset(self, preset: int):
-        self.dev.write(
-            self.ENDPOINT_TX,
-            self._create_msgdata((self.TX, self.OPT_EQ_PRESET, preset)),
-        )
+    # def set_eq_preset(self, preset: int):
+    #     self.dev.write(
+    #         self.ENDPOINT_TX,
+    #         self._create_msgdata((self.TX, self.OPT_EQ_PRESET, preset)),
+    #     )
     
     # Checks available sinks and select headset
     def _detect_original_sink(self):
@@ -109,7 +110,7 @@ class NovaProWireless:
         for sink in sinks:
             print(sink)
             name = sink.split("\t")[1]
-            if "SteelSeries_Arctis_Nova_Pro_Wireless" in name:
+            if "SteelSeries_Arctis_Nova_5X" in name:
                 self.PW_ORIGINAL_SINK = name
                 break
 
@@ -138,12 +139,14 @@ class NovaProWireless:
         while not self.CLOSE:
             try:
                 msg = self.dev.read(self.ENDPOINT_RX, self.MSGLEN)
-                if msg[1] != self.OPT_CHATMIX:
+                if msg[0] != self.OPT_CHATMIX:
+                    print(msg)
                     continue
 
                 # 4th and 5th byte contain ChatMix data
-                gamevol = msg[2]
-                chatvol = msg[3]
+                # print(msg[1:3])
+                gamevol = msg[1]
+                chatvol = msg[2]
 
                 # Set Volume using PulseAudio tools. Can be done with pure pipewire tools, but I didn't feel like it
                 cmd = ["pactl", "set-sink-volume"]
@@ -154,7 +157,8 @@ class NovaProWireless:
             # Ignore timeout.
             except USBTimeoutError:
                 continue
-            except USBError:
+            except USBError as e:
+                raise
                 print("Device was probably disconnected, exiting..")
                 self.CLOSE = True
                 self._remove_virtual_sinks()
@@ -194,10 +198,8 @@ class NovaProWireless:
 # When run directly, just start the ChatMix implementation. (And activate the icon, just for fun)
 if __name__ == "__main__":
     nova = NovaProWireless()
-    nova.set_sonar_icon(True)
-    nova.set_chatmix_controls(True)
-
     signal(SIGINT, nova.close)
     signal(SIGTERM, nova.close)
-
+    # nova.set_sonar_icon(True)
+    # nova.set_chatmix_controls(True)
     nova.chatmix()
