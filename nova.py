@@ -7,7 +7,14 @@ from signal import SIGINT, SIGTERM, signal
 from subprocess import Popen, check_output
 from typing import Callable, TypeVar
 
-from usb.core import Device, USBError, USBTimeoutError, find
+from usb.core import (
+    Device,
+    Endpoint,
+    Interface,
+    USBError,
+    USBTimeoutError,
+    find,
+)
 
 
 USB_MSG: type = array.array
@@ -15,35 +22,27 @@ USB_MSG: type = array.array
 OPT_CODES: type = dict[int, Callable[[USB_MSG], ...]]
 
 
-@dataclass(frozen=True)
-class HeadsetEndpoint:
-    # bInterfaceNumber
-    INTERFACE: int
-
-    # bEndpointAddress
-    ENDPOINT_TX: int | None
-    ENDPOINT_RX: int
-
-    # Total USB packet is 128 bytes, data is last 64 bytes.
-    MSG_LEN: int = field(default=64)
-
-    # First byte controls data direction.
-    TX: int = field(default=0x6)  # To base station.
-    RX: int = field(default=0x7)  # From base station.
-
-    def __post_init__(self):
-        if self.ENDPOINT_TX is None:
-            object.__setattr__(self, "TX", None)
-            # setattr(self, "TX", None)
+def get_endpoint(
+    dev: Device,
+    i_config: int,
+    b_interface_num: int,
+    b_alt_setting: int,
+    endpoint_num: int,
+) -> Endpoint:
+    return dev[i_config][(b_interface_num, b_alt_setting)][endpoint_num]
 
 
 @dataclass
 class HeadsetFeature(ABC):
-    endpoint: HeadsetEndpoint
+    in_endpoint: tuple[Interface, Endpoint]
+    out_endpoint: tuple[Interface, Endpoint] | None
+
+    tx: int = field(default=0x6, kw_only=True)
+    rx: int = field(default=0x7, kw_only=True)
 
     @property
     def has_action(self) -> bool:
-        return self.endpoint.ENDPOINT_TX is not None
+        return self.out_endpoint is not None
 
     @property
     def opt_codes(self) -> OPT_CODES:
@@ -55,14 +54,18 @@ class HeadsetFeature(ABC):
     # Takes a tuple of ints and turns it into bytes
     # with the correct length padded with zeroes
     def _create_msg_data(self, *data: int) -> bytes:
-        return bytes(data).ljust(self.endpoint.MSG_LEN, b"0")
+        if self.out_endpoint is None or not hasattr(
+            self.out_endpoint[1], "wMaxPacketSize"
+        ):
+            raise AttributeError
+        return bytes(data).ljust(self.out_endpoint[1].wMaxPacketSize, b"0")
 
     def _write(self, dev: Device, *data: int) -> bool:
-        if self.endpoint.ENDPOINT_TX is None:
+        if self.out_endpoint is None:
             return False
         dev.write(
-            self.endpoint.ENDPOINT_TX,
-            self._create_msg_data(self.endpoint.TX, *data),
+            self.out_endpoint[1],
+            self._create_msg_data(self.tx, *data),
         )
         return True
 
@@ -70,19 +73,20 @@ class HeadsetFeature(ABC):
 HF = TypeVar("HF", bound=HeadsetFeature)
 
 
-class Headset(ABC):
+class Headset(ABC, Device):
     # USB IDs
     VID: int = NotImplemented
     PID: int = NotImplemented
 
     # Selects correct device, and makes sure we can control it
     def __init__(self):
-        self.dev = find(idVendor=self.VID, idProduct=self.PID)
-        if self.dev is None:
+        from_: Device = find(idVendor=self.VID, idProduct=self.PID)
+        if from_ is None:
             raise ValueError("Device not found")
+        super().__init__(from_._ctx.dev, from_._ctx.backend)
 
         self.actions: dict[type[HF], HF] = {}
-        self.listeners: dict[HeadsetEndpoint, OPT_CODES] = {}
+        self.listeners: dict[Endpoint, OPT_CODES] = {}
         self.on_open: list[Callable[["Headset"], ...]] = []
         self.on_close: list[Callable[["Headset"], ...]] = []
         # Stops processes when program exits
@@ -93,7 +97,7 @@ class Headset(ABC):
     ) -> bool:
         if cls not in self.actions:
             return False
-        method(self.actions[cls], self.dev, *args, **kwargs)
+        method(self.actions[cls], self, *args, **kwargs)
         return True
 
     def _add_features(self, *features: HeadsetFeature):
@@ -101,12 +105,12 @@ class Headset(ABC):
             self._add_feature(feat)
 
     def _add_feature(self, feature: HeadsetFeature):
-        interface_features = self.listeners.get(feature.endpoint, {})
+        interface_features = self.listeners.get(feature.in_endpoint[1], {})
         interface_features.update(feature.opt_codes)
-        self.listeners[feature.endpoint] = interface_features
+        self.listeners[feature.in_endpoint[1]] = interface_features
 
-        if self.dev.is_kernel_driver_active(feature.endpoint.INTERFACE):
-            self.dev.detach_kernel_driver(feature.endpoint.INTERFACE)
+        if self.is_kernel_driver_active(feature.in_endpoint[0].index):
+            self.detach_kernel_driver(feature.in_endpoint[0].index)
 
         if feature.has_action:
             self.actions[feature.__class__] = feature
@@ -138,10 +142,10 @@ class Headset(ABC):
     #         except USBTimeoutError:
     #             continue
 
-    def listen(self, endpoint: HeadsetEndpoint):
+    def listen(self, endpoint: Endpoint):
         while not self.closing:
             try:
-                msg = self.dev.read(endpoint.ENDPOINT_RX, endpoint.MSG_LEN, -1)
+                msg = self.read(endpoint, endpoint.wMaxPacketSize, -1)
                 action = self.listeners[endpoint].get(msg[0])
                 if __debug__:
                     print(msg)
@@ -168,7 +172,6 @@ class Headset(ABC):
 
 @dataclass
 class SonarIcon(HeadsetFeature):
-    endpoint: HeadsetEndpoint
     # As far as I know, this only controls the icon.
     opt_sonar_icon: int = field(default=141)
 
@@ -188,7 +191,6 @@ class SonarIcon(HeadsetFeature):
 @dataclass
 class ChatMix(HeadsetFeature):
     device_name: str
-    endpoint: HeadsetEndpoint
     # ChatMix controls, 2 bytes show and control game and chat volume.
     opt_chatmix: int = field(default=69)
     # Enabling this options enables
@@ -290,7 +292,6 @@ class ChatMix(HeadsetFeature):
 
 @dataclass
 class Volume(HeadsetFeature):
-    endpoint: HeadsetEndpoint
     # Volume controls, 1 byte
     opt_volume: int = field(default=37)
 
@@ -305,8 +306,6 @@ class Volume(HeadsetFeature):
 
 @dataclass
 class EQ(HeadsetFeature):
-    endpoint: HeadsetEndpoint
-
     # EQ controls, 2 bytes show and control which band and what value.
     opt_eq: int = field(default=49)
     # EQ preset controls, 1 byte sets and shows enabled preset.
@@ -327,17 +326,27 @@ class NovaProWireless(Headset):
     VID = 0x1038
     PID = 0x12E0
 
-    ENDPOINT_4 = HeadsetEndpoint(0x4, 0x4, 0x84)
+    @property
+    def ep_4_in(self):
+        return self._ctx.get_interface_and_endpoint(self, 0x84)
+
+    @property
+    def ep_4_out(self):
+        return self._ctx.get_interface_and_endpoint(self, 0x4)
 
     def __init__(self):
         super().__init__()
         self._add_features(
-            SonarIcon(self.ENDPOINT_4, 141),
+            SonarIcon(self.ep_4_in, self.ep_4_out, 141),
             ChatMix(
-                "SteelSeries_Arctis_Nova_Pro_Wireless", self.ENDPOINT_4, 69, 73
+                self.ep_4_in,
+                self.ep_4_out,
+                "SteelSeries_Arctis_Nova_Pro_Wireless",
+                69,
+                73,
             ),
-            Volume(self.ENDPOINT_4, 37),
-            EQ(self.ENDPOINT_4, 49, 46),
+            Volume(self.ep_4_in, self.ep_4_out, 37),
+            EQ(self.ep_4_in, self.ep_4_out, 49, 46),
         )
         self.open()
 
@@ -347,12 +356,14 @@ class Nova5X(Headset):
     VID = 0x1038
     PID = 0x2253
 
-    ENDPOINT_4 = HeadsetEndpoint(0x5, None, 0x84)
+    @property
+    def ep_4_in(self):
+        return self._ctx.get_interface_and_endpoint(self, 0x84)
 
     def __init__(self):
         super().__init__()
         self._add_feature(
-            ChatMix(self.ENDPOINT_4, "SteelSeries_Arctis_Nova_5X", 69),
+            ChatMix(self.ep_4_in, None, "SteelSeries_Arctis_Nova_5X", 69),
         )
         self.open()
 
@@ -366,6 +377,6 @@ if __name__ == "__main__":
     try:
         nova.attempt_action(SonarIcon, SonarIcon.set_sonar_icon, True)
         nova.attempt_action(ChatMix, ChatMix.set_chatmix_controls, True)
-        nova.listen(nova.ENDPOINT_4)
+        nova.listen(nova.ep_4_in[1])
     finally:
         nova.close(..., ...)
