@@ -19,7 +19,8 @@ from usb.core import (
 
 USB_MSG: type = array.array
 # dict[Code, Action(USB_MSB) -> ...]
-OPT_CODES: type = dict[int, Callable[[USB_MSG], ...]]
+ACTION = Callable[[USB_MSG], ...]
+OPT_CODES: type = dict[int, ACTION]
 
 
 def get_endpoint(
@@ -145,6 +146,7 @@ class Headset(ABC, Device):
     def listen(self, endpoint: Endpoint):
         while not self.closing:
             try:
+                # Note: Blocks closing
                 msg = self.read(endpoint, endpoint.wMaxPacketSize, -1)
                 action = self.listeners[endpoint].get(msg[0])
                 if __debug__:
@@ -221,8 +223,8 @@ class ChatMix(HeadsetFeature):
         if self._write(dev, self.opt_chatmix_enable, int(state)):
             self.chatmix_controls_enabled = state
 
-    def on_open(self, _dev):
-        self._start_virtual_sinks()
+    # def on_open(self, _dev):
+    #     self._start_virtual_sinks()
 
     def on_close(self, dev):
         if self.chatmix_controls_enabled:
@@ -246,6 +248,18 @@ class ChatMix(HeadsetFeature):
                 self.pw_original_sink = name
                 break
 
+    def _are_sinks_open(self) -> (bool, bool):
+        """Checks if the sinks' processes exists and haven't been terminated.
+
+        :return: (game sink open, chat sink open)
+        """
+        return (
+            self.pw_loopback_game_process is not None
+            and self.pw_loopback_game_process.poll() is None,
+            self.pw_loopback_chat_process is not None
+            and self.pw_loopback_chat_process.poll() is None,
+        )
+
     # Creates virtual pipewire loopback sinks,
     # and redirects them to the real headset sink
     def _start_virtual_sinks(self):
@@ -257,8 +271,12 @@ class ChatMix(HeadsetFeature):
             "--capture-props=media.class=Audio/Sink",
             "-n",
         ]
-        self.pw_loopback_game_process = Popen(cmd + [self.pw_game_sink])
-        self.pw_loopback_chat_process = Popen(cmd + [self.pw_chat_sink])
+
+        game, chat = self._are_sinks_open()
+        if not game:
+            self.pw_loopback_game_process = Popen(cmd + [self.pw_game_sink])
+        if not chat:
+            self.pw_loopback_chat_process = Popen(cmd + [self.pw_chat_sink])
 
     def _remove_virtual_sinks(self):
         if self.pw_loopback_game_process is not None:
@@ -267,6 +285,10 @@ class ChatMix(HeadsetFeature):
             self.pw_loopback_chat_process.terminate()
 
     def chatmix(self, msg: USB_MSG):
+        if False in self._are_sinks_open():
+            # One or both sinks are closed
+            return
+
         # 4th and 5th byte contain ChatMix data
         # print(msg[1:3])
         game_vol = msg[1]
@@ -362,10 +384,21 @@ class Nova5X(Headset):
 
     def __init__(self):
         super().__init__()
-        self._add_feature(
-            ChatMix(self.ep_4_in, None, "SteelSeries_Arctis_Nova_5X", 69),
+        self.chatmix = ChatMix(
+            self.ep_4_in, None, "SteelSeries_Arctis_Nova_5X", 69
         )
+        self._add_feature(self.chatmix)
+        self.listeners[self.ep_4_in[1]][185] = self.on_power_change
         self.open()
+
+    def on_power_change(self, msg: USB_MSG):
+        match msg[1]:
+            case 2:  # Power Off
+                self.chatmix._remove_virtual_sinks()
+            case 3:  # Power On
+                self.chatmix._start_virtual_sinks()
+            case _:
+                pass
 
 
 # When run directly, just start the ChatMix implementation.
