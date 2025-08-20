@@ -1,21 +1,19 @@
 #!/usr/bin/python3
+
 # Licensed under the 0BSD
+
 import array
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass, field
 from signal import SIGINT, SIGTERM, signal
 from subprocess import Popen, check_output
 from typing import Callable, TypeVar
 
-from usb.core import (
-    Device,
-    Endpoint,
-    Interface,
-    USBError,
-    USBTimeoutError,
-    find,
-)
+from hid import device
+from hid import enumerate as hidenumerate
 
+CMD_PACTL = "pactl"
+CMD_PWLOOPBACK = "pw-loopback"
 
 USB_MSG: type = array.array
 # dict[Code, Action(USB_MSB) -> ...]
@@ -23,27 +21,10 @@ ACTION = Callable[[USB_MSG], ...]
 OPT_CODES: type = dict[int, ACTION]
 
 
-def get_endpoint(
-    dev: Device,
-    i_config: int,
-    b_interface_num: int,
-    b_alt_setting: int,
-    endpoint_num: int,
-) -> Endpoint:
-    return dev[i_config][(b_interface_num, b_alt_setting)][endpoint_num]
-
-
 @dataclass
 class HeadsetFeature(ABC):
-    in_endpoint: tuple[Interface, Endpoint]
-    out_endpoint: tuple[Interface, Endpoint] | None
-
-    tx: int = field(default=0x6, kw_only=True)
-    rx: int = field(default=0x7, kw_only=True)
-
-    @property
-    def has_action(self) -> bool:
-        return self.out_endpoint is not None
+    tx: int | None
+    rx: int
 
     @property
     def opt_codes(self) -> OPT_CODES:
@@ -54,19 +35,15 @@ class HeadsetFeature(ABC):
 
     # Takes a tuple of ints and turns it into bytes
     # with the correct length padded with zeroes
-    def _create_msg_data(self, *data: int) -> bytes:
-        if self.out_endpoint is None or not hasattr(
-            self.out_endpoint[1], "wMaxPacketSize"
-        ):
-            raise AttributeError
-        return bytes(data).ljust(self.out_endpoint[1].wMaxPacketSize, b"0")
+    def _create_msg_data(self, *data: int, msg_len) -> bytes:
+        print(data)
+        return bytes(data).ljust(msg_len, b"0")
 
-    def _write(self, dev: Device, *data: int) -> bool:
-        if self.out_endpoint is None:
+    def _write(self, dev: device, *data: int) -> bool:
+        if self.tx in {NotImplemented, None}:
             return False
         dev.write(
-            self.out_endpoint[1],
-            self._create_msg_data(self.tx, *data),
+            self._create_msg_data(self.tx, *data, msg_len=dev.PACKET_SIZE),
         )
         return True
 
@@ -74,20 +51,36 @@ class HeadsetFeature(ABC):
 HF = TypeVar("HF", bound=HeadsetFeature)
 
 
-class Headset(ABC, Device):
+class Headset(ABC, device):
     # USB IDs
     VID: int = NotImplemented
     PID: int = NotImplemented
 
+    # bInterfaceNumber
+    INTERFACE: int = NotImplemented
+
+    # wMaxPacketSize
+    PACKET_SIZE: int = NotImplemented
+
+    # First byte controls data direction.
+    TX: int | None = NotImplemented  # To base station.
+    RX: int = NotImplemented  # From base station.
+
     # Selects correct device, and makes sure we can control it
     def __init__(self):
-        from_: Device = find(idVendor=self.VID, idProduct=self.PID)
-        if from_ is None:
-            raise ValueError("Device not found")
-        super().__init__(from_._ctx.dev, from_._ctx.backend)
+        devpath = None
+        for hiddev in hidenumerate(self.VID, self.PID):
+            if hiddev["interface_number"] == self.INTERFACE:
+                devpath = hiddev["path"]
+                break
+        if not devpath:
+            raise DeviceNotFoundException
+
+        super().__init__()
+        self.open_path(devpath)
 
         self.actions: dict[type[HF], HF] = {}
-        self.listeners: dict[Endpoint, OPT_CODES] = {}
+        self.listeners: OPT_CODES = {}
         self.on_open: list[Callable[["Headset"], ...]] = []
         self.on_close: list[Callable[["Headset"], ...]] = []
         # Stops processes when program exits
@@ -106,15 +99,8 @@ class Headset(ABC, Device):
             self._add_feature(feat)
 
     def _add_feature(self, feature: HeadsetFeature):
-        interface_features = self.listeners.get(feature.in_endpoint[1], {})
-        interface_features.update(feature.opt_codes)
-        self.listeners[feature.in_endpoint[1]] = interface_features
-
-        if self.is_kernel_driver_active(feature.in_endpoint[0].index):
-            self.detach_kernel_driver(feature.in_endpoint[0].index)
-
-        if feature.has_action:
-            self.actions[feature.__class__] = feature
+        self.listeners.update(feature.opt_codes)
+        self.actions[feature.__class__] = feature
 
         if hasattr(feature, "on_open"):
             self.on_open.append(feature.on_open)
@@ -143,29 +129,25 @@ class Headset(ABC, Device):
     #         except USBTimeoutError:
     #             continue
 
-    def listen(self, endpoint: Endpoint):
+    def listen(self):
         while not self.closing:
-            try:
-                # Note: Blocks closing
-                msg = self.read(endpoint, endpoint.wMaxPacketSize, -1)
-                action = self.listeners[endpoint].get(msg[0])
-                if __debug__:
-                    print(msg)
-                    print(action)
-                if action is not None:
-                    action(msg)
-
-            except USBTimeoutError:
-                continue
-            except USBError as _e:
-                raise
+            # Note: Blocks closing
+            msg = self.read(self.PACKET_SIZE)
+            action = self.listeners.get(msg[0])
+            if __debug__:
+                # print(msg)
+                print(action)
+            if action is not None:
+                action(msg)
         self.close(..., ...)
 
+    # Note: Overrides hidapi.device.open
     def open(self):
         for on_open in self.on_open:
             on_open(self)
 
     # Terminates processes and disables features
+    # Note: Overrides hidapi.device.close
     def close(self, _signum, _frame):
         self.closing = True
         for on_close in self.on_close:
@@ -175,7 +157,7 @@ class Headset(ABC, Device):
 @dataclass
 class SonarIcon(HeadsetFeature):
     # As far as I know, this only controls the icon.
-    opt_sonar_icon: int = field(default=141)
+    opt_sonar_icon: int = field(default=0x8D)
 
     # Keeps track of enabled features for when close() is called
     sonar_icon_enabled: bool = field(default=False, init=False)
@@ -185,7 +167,7 @@ class SonarIcon(HeadsetFeature):
         return {}
 
     # Enables/Disables Sonar Icon
-    def set_sonar_icon(self, dev: Device, state: bool):
+    def set_sonar_icon(self, dev: device, state: bool):
         if self._write(dev, self.opt_sonar_icon, int(state)):
             self.sonar_icon_enabled = state
 
@@ -194,10 +176,10 @@ class SonarIcon(HeadsetFeature):
 class ChatMix(HeadsetFeature):
     device_name: str
     # ChatMix controls, 2 bytes show and control game and chat volume.
-    opt_chatmix: int = field(default=69)
+    opt_chatmix: int = field(default=0x45)
     # Enabling this options enables
     # the ability to switch between volume and ChatMix.
-    opt_chatmix_enable: int = field(default=73)
+    opt_chatmix_enable: int = field(default=0x49)
 
     # PipeWire Names
     # This is automatically detected,
@@ -219,7 +201,7 @@ class ChatMix(HeadsetFeature):
         return {self.opt_chatmix: self.chatmix}
 
     # Enables/Disables chatmix controls
-    def set_chatmix_controls(self, dev: Device, state: bool):
+    def set_chatmix_controls(self, dev: device, state: bool):
         if self._write(dev, self.opt_chatmix_enable, int(state)):
             self.chatmix_controls_enabled = state
 
@@ -237,7 +219,7 @@ class ChatMix(HeadsetFeature):
         if self.pw_original_sink:
             return
         sinks = (
-            check_output(["pactl", "list", "sinks", "short"])
+            check_output([CMD_PACTL, "list", "sinks", "short"])
             .decode()
             .split("\n")
         )
@@ -245,8 +227,12 @@ class ChatMix(HeadsetFeature):
             print(sink)
             name = sink.split("\t")[1]
             if self.device_name in name:
+                print(name)
                 self.pw_original_sink = name
                 break
+        else:
+            raise RuntimeError("Original Sink not found")
+        print(self.pw_original_sink)
 
     def _are_sinks_open(self) -> (bool, bool):
         """Checks if the sinks' processes exists and haven't been terminated.
@@ -265,7 +251,7 @@ class ChatMix(HeadsetFeature):
     def _start_virtual_sinks(self):
         self._detect_original_sink()
         cmd = [
-            "pw-loopback",
+            CMD_PWLOOPBACK,
             "-P",
             self.pw_original_sink,
             "--capture-props=media.class=Audio/Sink",
@@ -296,7 +282,7 @@ class ChatMix(HeadsetFeature):
 
         # Set Volume using PulseAudio tools.
         # Can be done with pure pipewire tools, but I didn't feel like it
-        cmd = ["pactl", "set-sink-volume"]
+        cmd = [CMD_PACTL, "set-sink-volume"]
 
         # Actually change volume.
         # Everytime you turn the dial,
@@ -315,80 +301,88 @@ class ChatMix(HeadsetFeature):
 @dataclass
 class Volume(HeadsetFeature):
     # Volume controls, 1 byte
-    opt_volume: int = field(default=37)
+    opt_volume: int = field(default=0x25)
 
     @property
     def opt_codes(self) -> OPT_CODES:
         return {self.opt_volume: self.ignore}
 
     # Sets Volume
-    def set_volume(self, dev: Device, attenuation: int):
+    def set_volume(self, dev: device, attenuation: int):
         self._write(dev, self.opt_volume, attenuation)
 
 
 @dataclass
 class EQ(HeadsetFeature):
     # EQ controls, 2 bytes show and control which band and what value.
-    opt_eq: int = field(default=49)
+    opt_eq: int = field(default=0x31)
     # EQ preset controls, 1 byte sets and shows enabled preset.
     # Preset 4 is the custom preset required for OPT_EQ.
-    opt_eq_preset: int = field(default=46)
+    opt_eq_preset: int = field(default=0x2E)
 
     @property
     def opt_codes(self) -> OPT_CODES:
         return {self.opt_eq: self.ignore}
 
     # Sets EQ preset
-    def set_eq_preset(self, dev: Device, preset: int):
+    def set_eq_preset(self, dev: device, preset: int):
         self._write(dev, self.opt_eq_preset, preset)
 
 
 class NovaProWireless(Headset):
     # USB IDs
-    VID = 0x1038
-    PID = 0x12E0
+    VID: int = 0x1038
+    PID: int = 0x12E0
 
-    @property
-    def ep_4_in(self):
-        return self._ctx.get_interface_and_endpoint(self, 0x84)
+    # bInterfaceNumber
+    INTERFACE: int = 4
 
-    @property
-    def ep_4_out(self):
-        return self._ctx.get_interface_and_endpoint(self, 0x4)
+    # wMaxPacketSize
+    PACKET_SIZE: int = 64
+
+    # First byte controls data direction.
+    TX: int | None = 0x6  # To base station.
+    RX: int = 0x7  # From base station.
 
     def __init__(self):
         super().__init__()
         self._add_features(
-            SonarIcon(self.ep_4_in, self.ep_4_out, 141),
+            SonarIcon(self.TX, self.RX, 0x8D),
             ChatMix(
-                self.ep_4_in,
-                self.ep_4_out,
+                self.TX,
+                self.RX,
                 "SteelSeries_Arctis_Nova_Pro_Wireless",
-                69,
-                73,
+                0x45,
+                0x49,
             ),
-            Volume(self.ep_4_in, self.ep_4_out, 37),
-            EQ(self.ep_4_in, self.ep_4_out, 49, 46),
+            Volume(self.TX, self.RX, 0x25),
+            EQ(self.TX, self.RX, 0x31, 0x2E),
         )
         self.open()
 
 
 class Nova5X(Headset):
     # USB IDs
-    VID = 0x1038
-    PID = 0x2253
+    VID: int = 0x1038
+    PID: int = 0x2253
 
-    @property
-    def ep_4_in(self):
-        return self._ctx.get_interface_and_endpoint(self, 0x84)
+    # bInterfaceNumber
+    INTERFACE: int = 5
+
+    # wMaxPacketSize
+    PACKET_SIZE: int = 64
+
+    # First byte controls data direction.
+    TX: int | None = None  # To base station.
+    RX: int = 0x7  # From base station.
 
     def __init__(self):
         super().__init__()
         self.chatmix = ChatMix(
-            self.ep_4_in, None, "SteelSeries_Arctis_Nova_5X", 69
+            self.TX, self.RX, "SteelSeries_Arctis_Nova_5X", 0x45
         )
         self._add_feature(self.chatmix)
-        self.listeners[self.ep_4_in[1]][185] = self.on_power_change
+        self.listeners[0xB9] = self.on_power_change
         self.open()
 
     def on_power_change(self, msg: USB_MSG):
@@ -401,6 +395,10 @@ class Nova5X(Headset):
                 pass
 
 
+class DeviceNotFoundException(Exception):
+    pass
+
+
 # When run directly, just start the ChatMix implementation.
 # (And activate the icon, just for fun)
 if __name__ == "__main__":
@@ -410,6 +408,6 @@ if __name__ == "__main__":
     try:
         nova.attempt_action(SonarIcon, SonarIcon.set_sonar_icon, True)
         nova.attempt_action(ChatMix, ChatMix.set_chatmix_controls, True)
-        nova.listen(nova.ep_4_in[1])
+        nova.listen()
     finally:
         nova.close(..., ...)
