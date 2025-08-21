@@ -36,7 +36,6 @@ class HeadsetFeature(ABC):
     # Takes a tuple of ints and turns it into bytes
     # with the correct length padded with zeroes
     def _create_msg_data(self, *data: int, msg_len) -> bytes:
-        print(data)
         return bytes(data).ljust(msg_len, b"0")
 
     def _write(self, dev: device, *data: int) -> bool:
@@ -132,22 +131,24 @@ class Headset(ABC, device):
     def listen(self):
         while not self.closing:
             # Note: Blocks closing
-            msg = self.read(self.PACKET_SIZE)
+            msg = self.read(self.PACKET_SIZE, 1000)
+            if not msg:
+                continue
             action = self.listeners.get(msg[0])
             if __debug__:
-                # print(msg)
+                print(msg)
                 print(action)
             if action is not None:
                 action(msg)
         self.close(..., ...)
 
-    # Note: Overrides hidapi.device.open
+    # Note: Overwrites hidapi.device.open
     def open(self):
         for on_open in self.on_open:
             on_open(self)
 
     # Terminates processes and disables features
-    # Note: Overrides hidapi.device.close
+    # Note: Overwrites hidapi.device.close
     def close(self, _signum, _frame):
         self.closing = True
         for on_close in self.on_close:
@@ -224,7 +225,6 @@ class ChatMix(HeadsetFeature):
             .split("\n")
         )
         for sink in sinks:
-            print(sink)
             name = sink.split("\t")[1]
             if self.device_name in name:
                 print(name)
@@ -232,7 +232,6 @@ class ChatMix(HeadsetFeature):
                 break
         else:
             raise RuntimeError("Original Sink not found")
-        print(self.pw_original_sink)
 
     def _are_sinks_open(self) -> (bool, bool):
         """Checks if the sinks' processes exists and haven't been terminated.
@@ -273,7 +272,7 @@ class ChatMix(HeadsetFeature):
     def chatmix(self, msg: USB_MSG):
         if False in self._are_sinks_open():
             # One or both sinks are closed
-            return
+            self._start_virtual_sinks()
 
         # 4th and 5th byte contain ChatMix data
         # print(msg[1:3])
