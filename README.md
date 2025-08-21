@@ -39,7 +39,7 @@ On Fedora these can be installed with:
 sudo dnf install pulseaudio-utils python3 python3-hidapi
 ```
 
-On Debian based systems (like Ubuntu or Pop!_OS) these can be installed with:
+On Debian based systems (like Ubuntu or Pop!\_OS) these can be installed with:
 
 ```
 sudo apt install pulseaudio-utils python3 python3-hid
@@ -56,10 +56,10 @@ cd nova-chatmix-linux
 
 To be able to run the script as a non-root user, some udev rules need to be applied. This will allow regular users to access the base station USB device. It also starts the script when it gets plugged in (only when the systemd service is also set up).
 
-Copy `50-nova-pro-wireless.rules` to `/etc/udev/rules.d` and reload udev rules:
+Copy `50-nova-chatmix.rules` to `/etc/udev/rules.d` and reload udev rules:
 
 ```
-sudo cp 50-nova-pro-wireless.rules /etc/udev/rules.d/50-nova-pro-wireless.rules
+sudo cp 50-nova-chatmix.rules /etc/udev/rules.d/50-nova-chatmix.rules
 
 sudo udevadm control --reload-rules
 sudo udevadm trigger

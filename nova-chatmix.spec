@@ -22,7 +22,7 @@ sed -i 's#%h/\.local/bin#%{_bindir}#g' nova-chatmix.service
 
 %install
 install -Dm 0755 nova-chatmix.py %{buildroot}/%{_bindir}/nova-chatmix
-install -Dm 0644 50-nova-pro-wireless.rules %{buildroot}/%{_libdir}/udev/rules.d/50-nova-pro-wireless.rules
+install -Dm 0644 50-nova-chatmix.rules %{buildroot}/%{_libdir}/udev/rules.d/50-nova-chatmix.rules
 install -Dm 0644 nova-chatmix.service %{buildroot}/%{_libdir}/systemd/user/nova-chatmix.service
 
 %post
@@ -42,7 +42,7 @@ udevadm trigger
 %license LICENSE
 %doc README.md
 %{_bindir}/nova-chatmix
-%{_libdir}/udev/rules.d/50-nova-pro-wireless.rules
+%{_libdir}/udev/rules.d/50-nova-chatmix.rules
 %{_libdir}/systemd/user/nova-chatmix.service
 
 

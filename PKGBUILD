@@ -20,7 +20,7 @@ prepare() {
 package() {
   cd "${pkgname}"
   install -Dm755 nova-chatmix.py "${pkgdir}/usr/bin/nova-chatmix/nova-chatmix"
-  install -Dm644 50-nova-pro-wireless.rules "${pkgdir}/usr/lib/udev/rules.d/50-nova-pro-wireless.rules"
+  install -Dm644 50-nova-chatmix.rules "${pkgdir}/usr/lib/udev/rules.d/50-nova-chatmix.rules"
   install -Dm644 nova-chatmix.service "${pkgdir}/usr/lib/systemd/user/nova-chatmix.service"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

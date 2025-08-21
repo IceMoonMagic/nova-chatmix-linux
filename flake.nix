@@ -42,7 +42,7 @@
 
           postInstall = ''
             install -Dm755 nova-chatmix.py "$out/bin/nova-chatmix/nova-chatmix"
-            install -Dm644 50-nova-pro-wireless.rules "$out/lib/udev/rules.d/50-nova-pro-wireless.rules"
+            install -Dm644 50-nova-chatmix.rules "$out/lib/udev/rules.d/50-nova-chatmix.rules"
             install -Dm644 nova-chatmix.service "$out/lib/systemd/user/nova-chatmix.service"
           '';
 
