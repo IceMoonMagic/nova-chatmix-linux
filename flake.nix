@@ -1,60 +1,87 @@
 {
-  description = "steelseries chatmix support for linux";
-  inputs = { nixpkgs.url = "github:nixos/nixpkgs/nixos-24.11"; };
+  description = "SteelSeries ChatMix support for Linux";
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
 
-  outputs = { self, nixpkgs, ... }:
-    let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
-      lib = nixpkgs.lib;
-    in {
-      packages.${system} = {
-        default = pkgs.python3Packages.buildPythonApplication {
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+        lib = nixpkgs.lib;
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            (python3.withPackages (pypkgs: [ pypkgs.hidapi ]))
+          ];
+        };
+        packages.default = pkgs.python3Packages.buildPythonApplication {
           pname = "nova-chatmix";
-          version = "1.0";
+          version = "0.1.0";
 
-          propagatedBuildInputs =
-            [ pkgs.python3Packages.pyusb pkgs.pulseaudio pkgs.pipewire ];
+          propagatedBuildInputs = [
+            pkgs.python3Packages.hidapi
+            pkgs.pulseaudio
+            pkgs.pipewire
+          ];
 
           src = ./.;
 
+          preInstall = ''
+            sed -i 's#%h/\.local/bin#/usr/bin#g' ./nova-chatmix.service
+          '';
+
           postInstall = ''
-            mkdir -p $out/etc/udev/rules.d
-            cp ./50-nova-pro-wireless.rules $out/etc/udev/rules.d/
+            install -Dm755 nova-chatmix.py "$out/bin/nova-chatmix/nova-chatmix"
+            install -Dm644 50-nova-pro-wireless.rules "$out/lib/udev/rules.d/50-nova-pro-wireless.rules"
+            install -Dm644 nova-chatmix.service "$out/lib/systemd/user/nova-chatmix.service"
           '';
 
           meta = {
             homepage = "https://git.dymstro.nl/Dymstro/nova-chatmix-linux";
-            description =
-              "ChatMix for the Steelseries Arctis Nova Pro Wireless";
+            description = "ChatMix for the Steelseries Arctis Nova Pro Wireless";
             license = lib.licenses.bsd0;
           };
         };
-      };
-      devShell = pkgs.mkShell {
-        buildInputs = with pkgs; [ python3 python3Packages.pyusb ];
-      };
-      nixosModule = { config, lib, pkgs, ... }: {
-        options.services.nova-chatmix = {
-          enable = lib.mkEnableOption "steelseries chatmix support";
-        };
-        config = lib.mkIf config.services.nova-chatmix.enable {
-          services.udev.packages = [ self.packages.${system}.default ];
-          systemd.user.services.nova-chatmix = {
-            enable = true;
-            after = [ "pipewire.service" "pipewire-pulse.service" ];
-            wantedBy = [ "default.target" ];
-            wants = [ "network-online.target" ];
-            description =
-              "This will enable ChatMix for the Steelseries Arctis Nova Pro Wireless";
-            serviceConfig = {
-              Type = "simple";
-              Restart = "always";
-              ExecStartPre = "${pkgs.coreutils-full}/bin/sleep 10";
-              ExecStart = "${self.packages.${system}.default}/bin/nova.py";
+        nixosModules.default =
+          {
+            config,
+            lib,
+            pkgs,
+            ...
+          }:
+          {
+            options.services.nova-chatmix = {
+              enable = lib.mkEnableOption "steelseries chatmix support";
+            };
+            config = lib.mkIf config.services.nova-chatmix.enable {
+              services.udev.packages = [ self.packages.${system}.default ];
+              systemd.user.services.nova-chatmix = {
+                enable = true;
+                description = "Enable ChatMix for the Steelseries Arctis Nova Pro Wireless";
+                after = [
+                  "pipewire.service"
+                  "pipewire-pulse.service"
+                ];
+                wants = [ "network-online.target" ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${self.packages.${system}.default}/bin/nova-chatmix";
+                  Restart = "on-failure";
+                };
+                wantedBy = "default.target";
+              };
             };
           };
-        };
-      };
-    };
+      }
+    );
 }
