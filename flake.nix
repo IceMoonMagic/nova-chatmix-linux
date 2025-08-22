@@ -37,11 +37,11 @@
           src = ./.;
 
           preInstall = ''
-            sed -i 's#%h/\.local/bin#/usr/bin#g' ./nova-chatmix.service
+            sed -i 's#%h/\.local/bin#$out/bin#g' ./nova-chatmix.service
           '';
 
           postInstall = ''
-            install -Dm755 nova-chatmix.py "$out/bin/nova-chatmix/nova-chatmix"
+            install -Dm755 nova-chatmix.py "$out/bin/nova-chatmix"
             install -Dm644 50-nova-chatmix.rules "$out/lib/udev/rules.d/50-nova-chatmix.rules"
             install -Dm644 nova-chatmix.service "$out/lib/systemd/user/nova-chatmix.service"
           '';
@@ -52,36 +52,39 @@
             license = lib.licenses.bsd0;
           };
         };
-        nixosModules.default =
-          {
-            config,
-            lib,
-            pkgs,
-            ...
-          }:
-          {
-            options.services.nova-chatmix = {
-              enable = lib.mkEnableOption "steelseries chatmix support";
-            };
-            config = lib.mkIf config.services.nova-chatmix.enable {
-              services.udev.packages = [ self.packages.${system}.default ];
-              systemd.user.services.nova-chatmix = {
-                enable = true;
-                description = "Enable ChatMix for the Steelseries Arctis Nova Pro Wireless";
-                after = [
-                  "pipewire.service"
-                  "pipewire-pulse.service"
-                ];
-                wants = [ "network-online.target" ];
-                serviceConfig = {
-                  Type = "simple";
-                  ExecStart = "${self.packages.${system}.default}/bin/nova-chatmix";
-                  Restart = "on-failure";
+        nixosModules = rec {
+          default = nova-chatmix;
+          nova-chatmix =
+            {
+              config,
+              lib,
+              pkgs,
+              ...
+            }:
+            {
+              options.services.nova-chatmix = {
+                enable = lib.mkEnableOption "steelseries chatmix support";
+              };
+              config = lib.mkIf config.services.nova-chatmix.enable {
+                services.udev.packages = [ self.packages.${system}.default ];
+                systemd.user.services.nova-chatmix = {
+                  enable = true;
+                  description = "Enable ChatMix for the Steelseries Arctis Nova Pro Wireless";
+                  after = [
+                    "pipewire.service"
+                    "pipewire-pulse.service"
+                  ];
+                  wants = [ "network-online.target" ];
+                  serviceConfig = {
+                    Type = "simple";
+                    ExecStart = "${self.packages.${system}.default}/bin/nova-chatmix";
+                    Restart = "on-failure";
+                  };
+                  wantedBy = [ "default.target" ];
                 };
-                wantedBy = "default.target";
               };
             };
-          };
+        };
       }
     );
 }
