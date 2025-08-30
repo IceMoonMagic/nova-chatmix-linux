@@ -398,15 +398,35 @@ class DeviceNotFoundException(Exception):
     pass
 
 
-# When run directly, just start the ChatMix implementation.
-# (And activate the icon, just for fun)
-if __name__ == "__main__":
-    nova = Nova5X()
+def main():
+    try:
+        nova = Nova5X()
+    except DeviceNotFoundException:
+        print("Device not found, exiting.")
+        return
+    except OSError as e:
+        if len(e.args) >= 1 and e.args[0] == "open failed":
+            print("Failed to open device, exiting.")
+            return
+        else:
+            raise
+
     signal(SIGINT, nova.close)
     signal(SIGTERM, nova.close)
     try:
         nova.attempt_action(SonarIcon, SonarIcon.set_sonar_icon, True)
         nova.attempt_action(ChatMix, ChatMix.set_chatmix_controls, True)
         nova.listen()
+    except OSError as e:
+        if len(e.args) >= 1 and e.args[0] == "read error":
+            print("Device disconnected, closing.")
+        else:
+            raise
     finally:
         nova.close(..., ...)
+
+
+# When run directly, just start the ChatMix implementation.
+# (And activate the icon, just for fun)
+if __name__ == "__main__":
+    main()
