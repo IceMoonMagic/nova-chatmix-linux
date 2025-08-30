@@ -407,7 +407,7 @@ def main():
     except OSError as e:
         if len(e.args) >= 1 and e.args[0] == "open failed":
             print("Failed to open device, exiting.")
-            return
+            exit(1)
         else:
             raise
 

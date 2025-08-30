@@ -1,12 +1,13 @@
 [Unit]
 Description=Enable ChatMix for the Steelseries Arctis Nova Pro Wireless
+BindsTo=pipewire.service pipewire-pulse.service
 After=pipewire.service pipewire-pulse.service
-Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/nova-chatmix
 Restart=on-failure
+RestartSec = 5
 
 [Install]
 WantedBy=default.target

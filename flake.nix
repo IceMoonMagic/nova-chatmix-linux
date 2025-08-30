@@ -70,15 +70,19 @@
                 systemd.user.services.nova-chatmix = {
                   enable = true;
                   description = "Enable ChatMix for the Steelseries Arctis Nova Pro Wireless";
+                  bindsTo = [
+                    "pipewire.service"
+                    "pipewire-pulse.service"
+                  ];
                   after = [
                     "pipewire.service"
                     "pipewire-pulse.service"
                   ];
-                  wants = [ "network-online.target" ];
                   serviceConfig = {
                     Type = "simple";
                     ExecStart = "${self.packages.${system}.default}/bin/nova-chatmix";
                     Restart = "on-failure";
+                    RestartSec = 5;
                   };
                   wantedBy = [ "default.target" ];
                 };
